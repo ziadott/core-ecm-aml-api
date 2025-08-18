@@ -344,20 +344,21 @@ def create_account(payload: AccountCreate, conn: Connection = Depends(get_conn))
 
 @app.post("/core/accounts/createAccount", status_code=201)
 def create_account_locked(payload: AccountCreate, conn: Connection = Depends(get_conn)):
-    data = payload.model_dump()
-    data["DebitBlocked"] = True  # force initial block
+    # ignore whatever comes in for DebitBlocked, always set TRUE at the DB layer
     sql = text(
         """
         INSERT INTO core.account (accountnumber, cif, accounttype, currency, debitblocked, productcode)
-        VALUES (:AccountNumber, :CIF, :AccountType, :Currency, :DebitBlocked, :ProductCode)
+        VALUES (:AccountNumber, :CIF, :AccountType, :Currency, TRUE, :ProductCode)
         RETURNING accountnumber AS "AccountNumber"
         """
     )
+    data = payload.model_dump()
     try:
         row = conn.execute(sql, data).fetchone()
         return {"AccountNumber": row["AccountNumber"]}
     except IntegrityError as e:
         raise HTTPException(status_code=400, detail=str(e.orig))
+
 
 
 @app.get("/core/accounts/{account_number}", response_model=AccountOut)
