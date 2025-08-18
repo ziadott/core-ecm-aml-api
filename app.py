@@ -260,6 +260,21 @@ def list_customers(branch: Optional[str] = Query(None), limit: int = Query(50, g
     rows = conn.execute(text(base), params).fetchall()
     return [row_to_dict(r) for r in rows]
 
+@app.get("/core/customers/by-national-id/{national_id}", response_model=CustomerOut)
+def get_customer_by_national_id(national_id: str, conn: Connection = Depends(get_conn)):
+    sql = text("""
+        SELECT cif AS "CIF", nationalid AS "NationalID", passportno AS "PassportNo", namear AS "NameAr",
+               nameen AS "NameEn", dob AS "DOB", gender AS "Gender", address AS "Address", mobile AS "Mobile",
+               email AS "Email", branchcode AS "BranchCode", createdat AS "CreatedAt"
+        FROM core.customer
+        WHERE nationalid = :nid
+        """)
+    row = conn.execute(sql, {"nid": national_id}).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Customer with this NationalID not found")
+    return row_to_dict(row)
+
+
 @app.patch("/core/customers/{cif}", response_model=CustomerOut)
 def update_customer(cif: int, payload: CustomerUpdate, conn: Connection = Depends(get_conn)):
     data = {k: v for k, v in payload.model_dump(exclude_unset=True).items()}
@@ -291,6 +306,23 @@ def delete_customer(cif: int, conn: Connection = Depends(get_conn)):
         raise HTTPException(status_code=404, detail="Customer not found")
     return
 
+@app.post("/core/customers/createCIF", status_code=201)
+def create_cif(payload: CustomerCreate, conn: Connection = Depends(get_conn)):
+    sql = text(
+        """
+        INSERT INTO core.customer
+        (nationalid, passportno, namear, nameen, dob, gender, address, mobile, email, branchcode)
+        VALUES (:NationalID, :PassportNo, :NameAr, :NameEn, :DOB, :Gender, :Address, :Mobile, :Email, :BranchCode)
+        RETURNING cif AS "CIF"
+        """
+    )
+    try:
+        row = conn.execute(sql, payload.model_dump()).fetchone()
+        return {"CIF": row["CIF"]}
+    except IntegrityError as e:
+        raise HTTPException(status_code=400, detail=str(e.orig))
+
+
 # ----------------------------------------------------------------------------
 # CRUD — Accounts
 # ----------------------------------------------------------------------------
@@ -309,6 +341,24 @@ def create_account(payload: AccountCreate, conn: Connection = Depends(get_conn))
         return row_to_dict(row)
     except IntegrityError as e:
         raise HTTPException(status_code=400, detail=str(e.orig))
+
+@app.post("/core/accounts/createAccount", status_code=201)
+def create_account_locked(payload: AccountCreate, conn: Connection = Depends(get_conn)):
+    data = payload.model_dump()
+    data["DebitBlocked"] = True  # force initial block
+    sql = text(
+        """
+        INSERT INTO core.account (accountnumber, cif, accounttype, currency, debitblocked, productcode)
+        VALUES (:AccountNumber, :CIF, :AccountType, :Currency, :DebitBlocked, :ProductCode)
+        RETURNING accountnumber AS "AccountNumber"
+        """
+    )
+    try:
+        row = conn.execute(sql, data).fetchone()
+        return {"AccountNumber": row["AccountNumber"]}
+    except IntegrityError as e:
+        raise HTTPException(status_code=400, detail=str(e.orig))
+
 
 @app.get("/core/accounts/{account_number}", response_model=AccountOut)
 def get_account(account_number: str, conn: Connection = Depends(get_conn)):
@@ -384,6 +434,22 @@ def get_folder(folder_id: uuid.UUID, conn: Connection = Depends(get_conn)):
     if not row:
         raise HTTPException(status_code=404, detail="Folder not found")
     return row_to_dict(row)
+
+@app.get("/ecm/folders/by-cif/{cif}", response_model=FolderOut)
+def get_folder_by_cif(cif: int, conn: Connection = Depends(get_conn)):
+    sql = text("""
+        SELECT folderid AS "FolderId", cif AS "CIF", requestid AS "RequestId",
+               pathhint AS "PathHint", createdat AS "CreatedAt"
+        FROM ecm.folder
+        WHERE cif = :cif
+        ORDER BY createdat DESC
+        LIMIT 1
+    """)
+    row = conn.execute(sql, {"cif": cif}).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="No folder found for this CIF")
+    return row_to_dict(row)
+
 
 @app.get("/ecm/folders", response_model=List[FolderOut])
 def list_folders(cif: Optional[int] = Query(None), request_id: Optional[str] = Query(None), limit: int = Query(50, ge=1, le=500), conn: Connection = Depends(get_conn)):
@@ -470,6 +536,26 @@ def list_documents(folder_id: Optional[uuid.UUID] = Query(None), request_id: Opt
     rows = conn.execute(text(base), params).fetchall()
     return [row_to_dict(r) for r in rows]
 
+@app.get("/ecm/documents/by-folder-request", response_model=DocumentOut)
+def get_doc_by_folderid_requestid(
+    folder_id: uuid.UUID = Query(...),
+    request_id: str = Query(...),
+    conn: Connection = Depends(get_conn),
+):
+    sql = text("""
+        SELECT documentid AS "DocumentId", folderid AS "FolderId", requestid AS "RequestId",
+               doctype AS "DocType", filename AS "FileName", uploadedat AS "UploadedAt"
+        FROM ecm.document
+        WHERE folderid = :fid AND requestid = :rid
+        ORDER BY uploadedat DESC
+        LIMIT 1
+    """)
+    row = conn.execute(sql, {"fid": str(folder_id), "rid": request_id}).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="No document found for this FolderId and RequestId")
+    return row_to_dict(row)
+
+
 @app.patch("/ecm/documents/{document_id}", response_model=DocumentOut)
 def update_document(document_id: uuid.UUID, payload: DocumentUpdate, conn: Connection = Depends(get_conn)):
     data = {k: v for k, v in payload.model_dump(exclude_unset=True).items()}
@@ -540,6 +626,23 @@ def list_screenings(national_id: Optional[str] = Query(None), passport_no: Optio
     base += " ORDER BY performedat DESC LIMIT :lim"
     rows = conn.execute(text(base), params).fetchall()
     return [row_to_dict(r) for r in rows]
+
+@app.get("/aml/screenings/by-national-id/{national_id}", response_model=ScreeningOut)
+def get_screening_by_national_id(national_id: str, conn: Connection = Depends(get_conn)):
+    sql = text("""
+        SELECT screeningid AS "ScreeningId", nationalid AS "NationalID", passportno AS "PassportNo",
+               namear AS "NameAr", nameen AS "NameEn", riskscore AS "RiskScore", risklevel AS "RiskLevel",
+               hitscount AS "HitsCount", performedat AS "PerformedAt"
+        FROM aml.screening
+        WHERE nationalid = :nid
+        ORDER BY performedat DESC
+        LIMIT 1
+    """)
+    row = conn.execute(sql, {"nid": national_id}).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="No screening found for this NationalID")
+    return row_to_dict(row)
+
 
 @app.patch("/aml/screenings/{screening_id}", response_model=ScreeningOut)
 def update_screening(screening_id: uuid.UUID, payload: ScreeningUpdate, conn: Connection = Depends(get_conn)):
