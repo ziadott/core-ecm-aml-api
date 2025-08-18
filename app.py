@@ -5,7 +5,7 @@ from typing import Optional, List, Literal
 
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, EmailStr, constr
+from pydantic import BaseModel, Field, EmailStr, constr, ConfigDict
 from dotenv import load_dotenv
 
 from sqlalchemy import create_engine, text
@@ -145,6 +145,16 @@ class CustomerUpdate(BaseModel):
 class CustomerOut(CustomerCreate):
     CIF: int
     CreatedAt: datetime
+
+class AccountCreateLocked(BaseModel):
+    AccountNumber: constr(min_length=1, max_length=20)
+    CIF: int
+    AccountType: constr(min_length=1, max_length=30)
+    Currency: constr(min_length=3, max_length=3)
+    ProductCode: str | None = None
+
+    # Reject unexpected fields (so if client sends "DebitBlocked": false -> 422)
+    model_config = ConfigDict(extra='forbid')
 
 class AccountCreate(BaseModel):
     AccountNumber: constr(min_length=1, max_length=20)
@@ -343,8 +353,7 @@ def create_account(payload: AccountCreate, conn: Connection = Depends(get_conn))
         raise HTTPException(status_code=400, detail=str(e.orig))
 
 @app.post("/core/accounts/createAccount", status_code=201)
-def create_account_locked(payload: AccountCreate, conn: Connection = Depends(get_conn)):
-    # ignore whatever comes in for DebitBlocked, always set TRUE at the DB layer
+def create_account_locked(payload: AccountCreateLocked, conn: Connection = Depends(get_conn)):
     sql = text(
         """
         INSERT INTO core.account (accountnumber, cif, accounttype, currency, debitblocked, productcode)
@@ -358,6 +367,7 @@ def create_account_locked(payload: AccountCreate, conn: Connection = Depends(get
         return {"AccountNumber": row["AccountNumber"]}
     except IntegrityError as e:
         raise HTTPException(status_code=400, detail=str(e.orig))
+
 
 
 
@@ -512,6 +522,25 @@ def create_document(payload: DocumentCreate, conn: Connection = Depends(get_conn
     except IntegrityError as e:
         raise HTTPException(status_code=400, detail=str(e.orig))
 
+@app.get("/ecm/documents/by-folder-request", response_model=DocumentOut)
+def get_doc_by_folderid_requestid(
+    folder_id: uuid.UUID = Query(...),
+    request_id: str = Query(...),
+    conn: Connection = Depends(get_conn),
+):
+    sql = text("""
+        SELECT documentid AS "DocumentId", folderid AS "FolderId", requestid AS "RequestId",
+               doctype AS "DocType", filename AS "FileName", uploadedat AS "UploadedAt"
+        FROM ecm.document
+        WHERE folderid = :fid AND requestid = :rid
+        ORDER BY uploadedat DESC
+        LIMIT 1
+    """)
+    row = conn.execute(sql, {"fid": str(folder_id), "rid": request_id}).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="No document found for this FolderId and RequestId")
+    return row_to_dict(row)
+
 @app.get("/ecm/documents/{document_id}", response_model=DocumentOut)
 def get_document(document_id: uuid.UUID, conn: Connection = Depends(get_conn)):
     sql = text("SELECT documentid AS \"DocumentId\", folderid AS \"FolderId\", requestid AS \"RequestId\", doctype AS \"DocType\", filename AS \"FileName\", uploadedat AS \"UploadedAt\" FROM ecm.document WHERE documentid=:id")
@@ -537,24 +566,6 @@ def list_documents(folder_id: Optional[uuid.UUID] = Query(None), request_id: Opt
     rows = conn.execute(text(base), params).fetchall()
     return [row_to_dict(r) for r in rows]
 
-@app.get("/ecm/documents/by-folder-request", response_model=DocumentOut)
-def get_doc_by_folderid_requestid(
-    folder_id: uuid.UUID = Query(...),
-    request_id: str = Query(...),
-    conn: Connection = Depends(get_conn),
-):
-    sql = text("""
-        SELECT documentid AS "DocumentId", folderid AS "FolderId", requestid AS "RequestId",
-               doctype AS "DocType", filename AS "FileName", uploadedat AS "UploadedAt"
-        FROM ecm.document
-        WHERE folderid = :fid AND requestid = :rid
-        ORDER BY uploadedat DESC
-        LIMIT 1
-    """)
-    row = conn.execute(sql, {"fid": str(folder_id), "rid": request_id}).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="No document found for this FolderId and RequestId")
-    return row_to_dict(row)
 
 
 @app.patch("/ecm/documents/{document_id}", response_model=DocumentOut)
