@@ -175,13 +175,6 @@ class AccountCreateLocked(BaseModel):
     # Reject unexpected fields (so if client sends "DebitBlocked": false -> 422)
     model_config = ConfigDict(extra='forbid')
 
-class AccountCreate(BaseModel):
-    AccountNumber: constr(min_length=1, max_length=20)
-    CIF: int
-    AccountType: constr(min_length=1, max_length=30)
-    Currency: constr(min_length=3, max_length=3)
-    DebitBlocked: Optional[bool] = False
-    ProductCode: Optional[str] = None
 
 class AccountUpdate(BaseModel):
     AccountType: Optional[str] = None
@@ -189,7 +182,7 @@ class AccountUpdate(BaseModel):
     DebitBlocked: Optional[bool] = None
     ProductCode: Optional[str] = None
 
-class AccountOut(AccountCreate):
+class AccountOut(AccountCreateLocked):
     CreatedAt: datetime
 
 class FolderCreate(BaseModel):
@@ -345,7 +338,7 @@ def create_cif(payload: CustomerCreate, conn: Connection = Depends(get_conn)):
     """)
     try:
         row = conn.execute(sql, payload.model_dump()).fetchone()
-        return {"CIF": row["CIF"]}
+        return {"CIF": row_to_dict(row)["CIF"]}
     except IntegrityError as e:
         # duplicate NationalID/PassportNo, etc.
         raise HTTPException(status_code=400, detail=f"IntegrityError: {getattr(e.orig, 'diag', getattr(e.orig, 'pgerror', str(e)))}")
@@ -359,21 +352,6 @@ def create_cif(payload: CustomerCreate, conn: Connection = Depends(get_conn)):
 # ----------------------------------------------------------------------------
 # CRUD — Accounts
 # ----------------------------------------------------------------------------
-@app.post("/core/accounts", response_model=AccountOut, status_code=201)
-def create_account(payload: AccountCreate, conn: Connection = Depends(get_conn)):
-    sql = text(
-        """
-        INSERT INTO core.account (accountnumber, cif, accounttype, currency, debitblocked, productcode)
-        VALUES (:AccountNumber, :CIF, :AccountType, :Currency, :DebitBlocked, :ProductCode)
-        RETURNING accountnumber AS "AccountNumber", cif AS "CIF", accounttype AS "AccountType", currency AS "Currency",
-                  debitblocked AS "DebitBlocked", productcode AS "ProductCode", createdat AS "CreatedAt"
-        """
-    )
-    try:
-        row = conn.execute(sql, payload.model_dump()).fetchone()
-        return row_to_dict(row)
-    except IntegrityError as e:
-        raise HTTPException(status_code=400, detail=str(e.orig))
 
 @app.post("/core/accounts/createAccount", status_code=201)
 def create_account_locked(payload: AccountCreateLocked, conn: Connection = Depends(get_conn)):
@@ -387,7 +365,7 @@ def create_account_locked(payload: AccountCreateLocked, conn: Connection = Depen
     data = payload.model_dump()
     try:
         row = conn.execute(sql, data).fetchone()
-        return {"AccountNumber": row["AccountNumber"]}
+        return {"AccountNumber": row_to_dict(row)["AccountNumber"]}
     except IntegrityError as e:
         raise HTTPException(status_code=400, detail=str(e.orig))
 
