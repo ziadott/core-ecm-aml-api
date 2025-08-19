@@ -6,7 +6,7 @@ from typing import Optional, List, Literal
 
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, EmailStr, constr, ConfigDict
+from pydantic import BaseModel, EmailStr, constr, ConfigDict, field_validator
 from dotenv import load_dotenv
 
 from sqlalchemy import create_engine, text
@@ -172,8 +172,17 @@ class AccountCreateLocked(BaseModel):
     Currency: constr(min_length=3, max_length=3)
     ProductCode: str | None = None
 
-    # Reject unexpected fields (so if client sends "DebitBlocked": false -> 422)
     model_config = ConfigDict(extra='forbid')
+
+    @field_validator("CIF", mode="before")
+    def _coerce_cif(cls, v):
+        if v is None or v == "":
+            return v
+        if isinstance(v, int):
+            return v
+        # accept numeric strings like "1000000013"
+        return int(str(v).strip())
+
 
 
 class AccountUpdate(BaseModel):
@@ -189,6 +198,15 @@ class FolderCreate(BaseModel):
     CIF: int
     RequestId: constr(min_length=1, max_length=50)
     PathHint: Optional[str] = None
+
+    @field_validator("CIF", mode="before")
+    def _coerce_cif(cls, v):
+        if v is None or v == "":
+            return v
+        if isinstance(v, int):
+            return v
+        return int(str(v).strip())
+
 
 class FolderUpdate(BaseModel):
     PathHint: Optional[str] = None
@@ -217,8 +235,25 @@ class ScreeningCreate(BaseModel):
     NameAr: Optional[str] = None
     NameEn: Optional[str] = None
     RiskScore: int
-    RiskLevel: Literal["LOW", "MEDIUM", "HIGH"]   # ⬅️ was: constr(regex=...)
+    RiskLevel: Literal["LOW", "MEDIUM", "HIGH"]
     HitsCount: Optional[int] = 0
+
+    @field_validator("RiskScore", mode="before")
+    def _coerce_riskscore(cls, v):
+        if v is None or v == "":
+            return v
+        if isinstance(v, int):
+            return v
+        return int(str(v).strip())
+
+    @field_validator("HitsCount", mode="before")
+    def _coerce_hitscount(cls, v):
+        if v in (None, ""):
+            return v
+        if isinstance(v, int):
+            return v
+        return int(str(v).strip())
+
 
 
 class ScreeningUpdate(BaseModel):
@@ -227,8 +262,17 @@ class ScreeningUpdate(BaseModel):
     NameAr: Optional[str] = None
     NameEn: Optional[str] = None
     RiskScore: Optional[int] = None
-    RiskLevel: Optional[Literal["LOW", "MEDIUM", "HIGH"]] = None  # ⬅️ was: constr(regex=...)
+    RiskLevel: Optional[Literal["LOW", "MEDIUM", "HIGH"]] = None
     HitsCount: Optional[int] = None
+
+    @field_validator("RiskScore", "HitsCount", mode="before")
+    def _coerce_optional_ints(cls, v):
+        if v in (None, ""):
+            return v
+        if isinstance(v, int):
+            return v
+        return int(str(v).strip())
+
 
 
 class ScreeningOut(ScreeningCreate):
