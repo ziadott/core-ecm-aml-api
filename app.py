@@ -551,7 +551,7 @@ def delete_account(account_number: str, conn: Connection = Depends(get_conn)):
 # ----------------------------------------------------------------------------
 # CRUD — ECM Folders
 # ----------------------------------------------------------------------------
-@app.post("/ecm/folders", response_model=FolderOut, status_code=201)
+@app.post("/core/folders/createFolder", response_model=FolderOut, status_code=201)
 def create_folder(
     payload: Union[FolderCreate, _BodyWrap_FolderCreate] = Body(...),
     conn: Connection = Depends(get_conn),
@@ -637,7 +637,7 @@ def delete_folder(folder_id: uuid.UUID, conn: Connection = Depends(get_conn)):
 # ----------------------------------------------------------------------------
 # CRUD — ECM Documents
 # ----------------------------------------------------------------------------
-@app.post("/ecm/documents", response_model=DocumentOut, status_code=201)
+@app.post("/core/documents/upload", response_model=DocumentOut, status_code=201)
 def create_document(
     payload: Union[DocumentCreate, _BodyWrap_DocumentCreate] = Body(...),
     conn: Connection = Depends(get_conn),
