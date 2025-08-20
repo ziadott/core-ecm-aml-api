@@ -4,9 +4,9 @@ import uuid
 from datetime import date, datetime
 from typing import Optional, List, Literal, Union
 
-from fastapi import FastAPI, Depends, HTTPException, Query, Body
+from fastapi import FastAPI, Depends, HTTPException, Query, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr, constr, ConfigDict, field_validator, Field
+from pydantic import BaseModel, EmailStr, constr, ConfigDict, field_validator, model_validator
 from dotenv import load_dotenv
 
 from sqlalchemy import create_engine, text
@@ -173,18 +173,65 @@ class AccountCreateLocked(BaseModel):
     CIF: int
     AccountType: constr(min_length=1, max_length=30)
     Currency: constr(min_length=3, max_length=3)
-    ProductCode: str | None = None
+    ProductCode: Optional[str] = None
 
-    # K2 sometimes sends extra fields (e.g., DebitBlocked). Ignore them.
-    model_config = ConfigDict(extra='ignore')
+    # tolerate extra/unknown props from K2, allow alias population if needed
+    model_config = ConfigDict(extra='ignore', populate_by_name=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_k2_shapes(cls, v):
+        """
+        Accept:
+          - raw dict
+          - {"body": {...}}
+          - any casing for keys (accountnumber, accountNumber, ACCOUNTNUMBER, etc.)
+        """
+        if not isinstance(v, dict):
+            return v
+
+        # unwrap common wrappers
+        for wrapper in ("body", "Body", "request", "Request"):
+            if wrapper in v and isinstance(v[wrapper], dict):
+                v = v[wrapper]
+
+        # normalize keys -> our PascalCase field names
+        keymap = {
+            "accountnumber": "AccountNumber",
+            "account_number": "AccountNumber",
+            "accountnumber".lower(): "AccountNumber",
+            "accounttype": "AccountType",
+            "account_type": "AccountType",
+            "currency": "Currency",
+            "productcode": "ProductCode",
+            "product_code": "ProductCode",
+            "cif": "CIF",
+        }
+        out = {}
+        for k, val in v.items():
+            norm = keymap.get(str(k).lower(), k)
+            out[norm] = val
+        return out
 
     @field_validator("CIF", mode="before")
+    @classmethod
     def _coerce_cif(cls, v):
         if v in (None, ""):
             return v
         if isinstance(v, int):
             return v
         return int(str(v).strip())
+
+    @field_validator("Currency", mode="before")
+    @classmethod
+    def _normalize_currency(cls, v):
+        if v is None:
+            return v
+        s = str(v).strip().upper()
+        if len(s) != 3:
+            # Let the normal length validator throw if still invalid
+            return s
+        return s
 
 
 
@@ -434,21 +481,16 @@ def create_cif(
 
 @app.post("/core/accounts/createAccount", status_code=201)
 def create_account_locked(
-    payload: Union[AccountCreateLocked, _BodyWrap_AccountCreateLocked] = Body(...),
+    payload: AccountCreateLocked = Body(...),
     conn: Connection = Depends(get_conn),
 ):
-    if isinstance(payload, _BodyWrap_AccountCreateLocked):
-        data = payload.body.model_dump()
-    else:
-        data = payload.model_dump()
-
     sql = text("""
         INSERT INTO core.account (accountnumber, cif, accounttype, currency, debitblocked, productcode)
         VALUES (:AccountNumber, :CIF, :AccountType, :Currency, TRUE, :ProductCode)
         RETURNING accountnumber AS "AccountNumber"
     """)
     try:
-        row = conn.execute(sql, data).fetchone()
+        row = conn.execute(sql, payload.model_dump()).fetchone()
         return {"AccountNumber": dict(row._mapping)["AccountNumber"]}
     except IntegrityError as e:
         raise HTTPException(status_code=400, detail=str(e.orig))
@@ -790,3 +832,18 @@ def delete_screening(screening_id: uuid.UUID, conn: Connection = Depends(get_con
 def health(conn: Connection = Depends(get_conn)):
     row = conn.execute(text("SELECT 1 AS ok")).fetchone()
     return {"ok": row[0] == 1}
+
+# ----------------------------------------------------------------------------
+# Testing Request
+# ----------------------------------------------------------------------------
+from fastapi import Request
+
+@app.post("/_debug/echo", include_in_schema=False)
+async def debug_echo(req: Request):
+    body = await req.body()
+    return {
+        "method": req.method,
+        "path": str(req.url.path),
+        "content_type": req.headers.get("content-type"),
+        "raw_body": body.decode(errors="replace")
+    }
