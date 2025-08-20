@@ -2,11 +2,11 @@ import logging
 import os
 import uuid
 from datetime import date, datetime
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Union
 
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr, constr, ConfigDict, field_validator
+from pydantic import BaseModel, EmailStr, constr, ConfigDict, field_validator, Field
 from dotenv import load_dotenv
 
 from sqlalchemy import create_engine, text
@@ -141,11 +141,14 @@ class CustomerCreate(BaseModel):
     NameAr: constr(strip_whitespace=True, min_length=1, max_length=200)
     NameEn: Optional[str] = None
     DOB: date
-    Gender: Literal["M", "F"]                     # ⬅️ was: constr(regex=...)
+    Gender: Literal["M", "F"]
     Address: Optional[str] = None
     Mobile: constr(min_length=4, max_length=20)
     Email: Optional[EmailStr] = None
     BranchCode: constr(min_length=1, max_length=10)
+
+    model_config = ConfigDict(extra='ignore')
+
 
 
 class CustomerUpdate(BaseModel):
@@ -172,16 +175,17 @@ class AccountCreateLocked(BaseModel):
     Currency: constr(min_length=3, max_length=3)
     ProductCode: str | None = None
 
-    model_config = ConfigDict(extra='forbid')
+    # K2 sometimes sends extra fields (e.g., DebitBlocked). Ignore them.
+    model_config = ConfigDict(extra='ignore')
 
     @field_validator("CIF", mode="before")
     def _coerce_cif(cls, v):
-        if v is None or v == "":
+        if v in (None, ""):
             return v
         if isinstance(v, int):
             return v
-        # accept numeric strings like "1000000013"
         return int(str(v).strip())
+
 
 
 
@@ -199,13 +203,16 @@ class FolderCreate(BaseModel):
     RequestId: constr(min_length=1, max_length=50)
     PathHint: Optional[str] = None
 
+    model_config = ConfigDict(extra='ignore')
+
     @field_validator("CIF", mode="before")
     def _coerce_cif(cls, v):
-        if v is None or v == "":
+        if v in (None, ""):
             return v
         if isinstance(v, int):
             return v
         return int(str(v).strip())
+
 
 
 class FolderUpdate(BaseModel):
@@ -220,6 +227,9 @@ class DocumentCreate(BaseModel):
     RequestId: constr(min_length=1, max_length=50)
     DocType: constr(min_length=1, max_length=50)
     FileName: constr(min_length=1, max_length=255)
+
+    model_config = ConfigDict(extra='ignore')
+
 
 class DocumentUpdate(BaseModel):
     DocType: Optional[str] = None
@@ -238,9 +248,11 @@ class ScreeningCreate(BaseModel):
     RiskLevel: Literal["LOW", "MEDIUM", "HIGH"]
     HitsCount: Optional[int] = 0
 
+    model_config = ConfigDict(extra='ignore')
+
     @field_validator("RiskScore", mode="before")
     def _coerce_riskscore(cls, v):
-        if v is None or v == "":
+        if v in (None, ""):
             return v
         if isinstance(v, int):
             return v
@@ -253,6 +265,7 @@ class ScreeningCreate(BaseModel):
         if isinstance(v, int):
             return v
         return int(str(v).strip())
+
 
 
 
@@ -279,6 +292,22 @@ class ScreeningOut(ScreeningCreate):
     ScreeningId: uuid.UUID
     PerformedAt: datetime
 
+class _BodyWrap_AccountCreateLocked(BaseModel):
+    body: AccountCreateLocked
+
+class _BodyWrap_CustomerCreate(BaseModel):
+    body: CustomerCreate
+
+class _BodyWrap_FolderCreate(BaseModel):
+    body: FolderCreate
+
+class _BodyWrap_DocumentCreate(BaseModel):
+    body: DocumentCreate
+
+class _BodyWrap_ScreeningCreate(BaseModel):
+    body: ScreeningCreate
+
+
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
@@ -290,22 +319,25 @@ def row_to_dict(row):
 # CRUD — Customers
 # ----------------------------------------------------------------------------
 @app.post("/core/customers", response_model=CustomerOut, status_code=201)
-def create_customer(payload: CustomerCreate, conn: Connection = Depends(get_conn)):
-    sql = text(
-        """
+def create_customer(
+    payload: Union[CustomerCreate, _BodyWrap_CustomerCreate] = Body(...),
+    conn: Connection = Depends(get_conn),
+):
+    data = payload.body.model_dump() if isinstance(payload, _BodyWrap_CustomerCreate) else payload.model_dump()
+    sql = text("""
         INSERT INTO core.customer
         (nationalid, passportno, namear, nameen, dob, gender, address, mobile, email, branchcode)
         VALUES (:NationalID, :PassportNo, :NameAr, :NameEn, :DOB, :Gender, :Address, :Mobile, :Email, :BranchCode)
         RETURNING cif AS "CIF", nationalid AS "NationalID", passportno AS "PassportNo", namear AS "NameAr",
                   nameen AS "NameEn", dob AS "DOB", gender AS "Gender", address AS "Address", mobile AS "Mobile",
                   email AS "Email", branchcode AS "BranchCode", createdat AS "CreatedAt"
-        """
-    )
+    """)
     try:
-        row = conn.execute(sql, payload.model_dump()).fetchone()
-        return row_to_dict(row)
+        row = conn.execute(sql, data).fetchone()
+        return dict(row._mapping)
     except IntegrityError as e:
         raise HTTPException(status_code=400, detail=str(e.orig))
+
 
 @app.get("/core/customers/{cif}", response_model=CustomerOut)
 def get_customer(cif: int, conn: Connection = Depends(get_conn)):
@@ -373,7 +405,11 @@ def delete_customer(cif: int, conn: Connection = Depends(get_conn)):
     return
 
 @app.post("/core/customers/createCIF", status_code=201)
-def create_cif(payload: CustomerCreate, conn: Connection = Depends(get_conn)):
+def create_cif(
+    payload: Union[CustomerCreate, _BodyWrap_CustomerCreate] = Body(...),
+    conn: Connection = Depends(get_conn),
+):
+    data = payload.body.model_dump() if isinstance(payload, _BodyWrap_CustomerCreate) else payload.model_dump()
     sql = text("""
       INSERT INTO core.customer
       (nationalid, passportno, namear, nameen, dob, gender, address, mobile, email, branchcode)
@@ -381,16 +417,15 @@ def create_cif(payload: CustomerCreate, conn: Connection = Depends(get_conn)):
       RETURNING cif AS "CIF"
     """)
     try:
-        row = conn.execute(sql, payload.model_dump()).fetchone()
-        return {"CIF": row_to_dict(row)["CIF"]}
+        row = conn.execute(sql, data).fetchone()
+        return {"CIF": dict(row._mapping)["CIF"]}
     except IntegrityError as e:
-        # duplicate NationalID/PassportNo, etc.
         raise HTTPException(status_code=400, detail=f"IntegrityError: {getattr(e.orig, 'diag', getattr(e.orig, 'pgerror', str(e)))}")
     except (ProgrammingError, OperationalError, DataError) as e:
-        # table missing / bad types / DB connectivity
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unhandled error: {str(e)}")
+
 
 
 # ----------------------------------------------------------------------------
@@ -398,20 +433,26 @@ def create_cif(payload: CustomerCreate, conn: Connection = Depends(get_conn)):
 # ----------------------------------------------------------------------------
 
 @app.post("/core/accounts/createAccount", status_code=201)
-def create_account_locked(payload: AccountCreateLocked, conn: Connection = Depends(get_conn)):
-    sql = text(
-        """
+def create_account_locked(
+    payload: Union[AccountCreateLocked, _BodyWrap_AccountCreateLocked] = Body(...),
+    conn: Connection = Depends(get_conn),
+):
+    if isinstance(payload, _BodyWrap_AccountCreateLocked):
+        data = payload.body.model_dump()
+    else:
+        data = payload.model_dump()
+
+    sql = text("""
         INSERT INTO core.account (accountnumber, cif, accounttype, currency, debitblocked, productcode)
         VALUES (:AccountNumber, :CIF, :AccountType, :Currency, TRUE, :ProductCode)
         RETURNING accountnumber AS "AccountNumber"
-        """
-    )
-    data = payload.model_dump()
+    """)
     try:
         row = conn.execute(sql, data).fetchone()
-        return {"AccountNumber": row_to_dict(row)["AccountNumber"]}
+        return {"AccountNumber": dict(row._mapping)["AccountNumber"]}
     except IntegrityError as e:
         raise HTTPException(status_code=400, detail=str(e.orig))
+
 
 
 
@@ -469,19 +510,22 @@ def delete_account(account_number: str, conn: Connection = Depends(get_conn)):
 # CRUD — ECM Folders
 # ----------------------------------------------------------------------------
 @app.post("/ecm/folders", response_model=FolderOut, status_code=201)
-def create_folder(payload: FolderCreate, conn: Connection = Depends(get_conn)):
-    sql = text(
-        """
+def create_folder(
+    payload: Union[FolderCreate, _BodyWrap_FolderCreate] = Body(...),
+    conn: Connection = Depends(get_conn),
+):
+    data = payload.body.model_dump() if isinstance(payload, _BodyWrap_FolderCreate) else payload.model_dump()
+    sql = text("""
         INSERT INTO ecm.folder (cif, requestid, pathhint)
         VALUES (:CIF, :RequestId, :PathHint)
         RETURNING folderid AS "FolderId", cif AS "CIF", requestid AS "RequestId", pathhint AS "PathHint", createdat AS "CreatedAt"
-        """
-    )
+    """)
     try:
-        row = conn.execute(sql, payload.model_dump()).fetchone()
-        return row_to_dict(row)
+        row = conn.execute(sql, data).fetchone()
+        return dict(row._mapping)
     except IntegrityError as e:
         raise HTTPException(status_code=400, detail=str(e.orig))
+
 
 @app.get("/ecm/folders/{folder_id}", response_model=FolderOut)
 def get_folder(folder_id: uuid.UUID, conn: Connection = Depends(get_conn)):
@@ -552,20 +596,25 @@ def delete_folder(folder_id: uuid.UUID, conn: Connection = Depends(get_conn)):
 # CRUD — ECM Documents
 # ----------------------------------------------------------------------------
 @app.post("/ecm/documents", response_model=DocumentOut, status_code=201)
-def create_document(payload: DocumentCreate, conn: Connection = Depends(get_conn)):
-    sql = text(
-        """
+def create_document(
+    payload: Union[DocumentCreate, _BodyWrap_DocumentCreate] = Body(...),
+    conn: Connection = Depends(get_conn),
+):
+    data = payload.body.model_dump() if isinstance(payload, _BodyWrap_DocumentCreate) else payload.model_dump()
+    sql = text("""
         INSERT INTO ecm.document (folderid, requestid, doctype, filename)
         VALUES (:FolderId, :RequestId, :DocType, :FileName)
         RETURNING documentid AS "DocumentId", folderid AS "FolderId", requestid AS "RequestId", doctype AS "DocType",
                   filename AS "FileName", uploadedat AS "UploadedAt"
-        """
-    )
+    """)
     try:
-        row = conn.execute(sql, {"FolderId": str(payload.FolderId), "RequestId": payload.RequestId, "DocType": payload.DocType, "FileName": payload.FileName}).fetchone()
-        return row_to_dict(row)
+        # ensure FolderId is a string UUID for DB
+        data["FolderId"] = str(data["FolderId"])
+        row = conn.execute(sql, data).fetchone()
+        return dict(row._mapping)
     except IntegrityError as e:
         raise HTTPException(status_code=400, detail=str(e.orig))
+
 
 @app.get("/ecm/documents/by-folder-request", response_model=DocumentOut)
 def get_doc_by_folderid_requestid(
@@ -644,20 +693,23 @@ def delete_document(document_id: uuid.UUID, conn: Connection = Depends(get_conn)
 # CRUD — AML Screenings
 # ----------------------------------------------------------------------------
 @app.post("/aml/screenings", response_model=ScreeningOut, status_code=201)
-def create_screening(payload: ScreeningCreate, conn: Connection = Depends(get_conn)):
-    sql = text(
-        """
+def create_screening(
+    payload: Union[ScreeningCreate, _BodyWrap_ScreeningCreate] = Body(...),
+    conn: Connection = Depends(get_conn),
+):
+    data = payload.body.model_dump() if isinstance(payload, _BodyWrap_ScreeningCreate) else payload.model_dump()
+    sql = text("""
         INSERT INTO aml.screening (nationalid, passportno, namear, nameen, riskscore, risklevel, hitscount)
         VALUES (:NationalID, :PassportNo, :NameAr, :NameEn, :RiskScore, :RiskLevel, :HitsCount)
         RETURNING screeningid AS "ScreeningId", nationalid AS "NationalID", passportno AS "PassportNo", namear AS "NameAr", nameen AS "NameEn",
                   riskscore AS "RiskScore", risklevel AS "RiskLevel", hitscount AS "HitsCount", performedat AS "PerformedAt"
-        """
-    )
+    """)
     try:
-        row = conn.execute(sql, payload.model_dump()).fetchone()
-        return row_to_dict(row)
+        row = conn.execute(sql, data).fetchone()
+        return dict(row._mapping)
     except IntegrityError as e:
         raise HTTPException(status_code=400, detail=str(e.orig))
+
 
 @app.get("/aml/screenings/{screening_id}", response_model=ScreeningOut)
 def get_screening(screening_id: uuid.UUID, conn: Connection = Depends(get_conn)):
